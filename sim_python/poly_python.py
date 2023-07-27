@@ -1,8 +1,9 @@
 import torch
-DTYPE = torch.float32
-# --- ARGUMENTS
+from utils import tl_cdiv, tl_load, tl_store
 
+# --- ARGUMENTS
 # Pointers to matrices
+DTYPE = torch.float32
 mixing_weights_ptr, weights_ptr, input_ptr, output_ptr = 0, 0, 0, 0
 
 # Matrix dimensions
@@ -25,49 +26,19 @@ A = torch.einsum("bs,sdr->bdr", (mixing_weights, skill_weights))
 A = A.reshape(bs, d_in, rank)
 exp_out = torch.einsum('bi,bio->bo', (input_, A))
 
-def ceil_div(num, deno):
-    return num // deno if num % deno == 0 else num // deno + 1 
-
 use_groups = True
 
 M, N = output_.size()
 K = d_in
 
-def tl_load(tensor, idx, mask=None, other=0.):
-    if mask is not None:
-        mask = mask.expand_as(idx)
-        valid_idx = idx[mask]
-        invalid_idx = idx[~mask]
-    else:
-        valid_idx = idx
-    
-    if valid_idx.max() >= tensor.numel():
-        raise IndexError
-    
-    if mask is None or mask.all():
-        output = tensor.flatten()[idx.flatten()].view_as(idx)
-    else:
-        output = torch.empty(size=idx.size(), dtype=tensor.dtype, device=tensor.device)
-        output[mask] = tensor.flatten()[valid_idx.flatten()]
-        output[~mask] = other
-        output = output.view_as(idx)
-    return output
-
-def tl_store(container, idx, values, mask=None):
-    if mask is None or mask.all():
-        container.flatten()[idx.flatten()] = values.flatten()
-    else:
-        container.flatten()[idx[mask].flatten()] = values[mask].flatten() 
-    return container
-
 # simulate launch grid
-for pid in range(ceil_div(M, BLOCK_SIZE_M) * ceil_div(N, BLOCK_SIZE_N)):
+for pid in range(tl_cdiv(M, BLOCK_SIZE_M) * tl_cdiv(N, BLOCK_SIZE_N)):
 
     # simulate a kernel call
     if use_groups:
         # get better l2-cache utilization by grouping
-        num_pid_m = ceil_div(M, BLOCK_SIZE_M)
-        num_pid_n = ceil_div(N, BLOCK_SIZE_N)
+        num_pid_m = tl_cdiv(M, BLOCK_SIZE_M)
+        num_pid_n = tl_cdiv(N, BLOCK_SIZE_N)
         num_pid_in_group = GROUP_SIZE_M * num_pid_n
         group_id = pid // num_pid_in_group
         first_pid_m = group_id * GROUP_SIZE_M
@@ -78,7 +49,7 @@ for pid in range(ceil_div(M, BLOCK_SIZE_M) * ceil_div(N, BLOCK_SIZE_N)):
         pass
     else:
         # each pid computes one (i,j) / (m, n) entry in the final matrix
-        num_blocks_n = ceil_div(N, BLOCK_SIZE_N)
+        num_blocks_n = tl_cdiv(N, BLOCK_SIZE_N)
         pid_m = pid // num_blocks_n
         pid_n = pid % num_blocks_n
 
@@ -111,7 +82,7 @@ for pid in range(ceil_div(M, BLOCK_SIZE_M) * ceil_div(N, BLOCK_SIZE_N)):
     mw_mask  = (offset_am[:, None] < M) 
     
     # for k_chunk in range(0, K, BLOCK_SIZE_K):
-    for k_chunk in range(0, ceil_div(K, BLOCK_SIZE_K)): # makes the masking of invalid outputs easier
+    for k_chunk in range(0, tl_cdiv(K, BLOCK_SIZE_K)): # makes the masking of invalid outputs easier
 
         x_mask   = (offset_am[:, None]  < M) & (offset_k[None, :] < K - k_chunk * BLOCK_SIZE_K)
         ws_mask  = (offset_k[:, None] < K - k_chunk * BLOCK_SIZE_K) & (offset_bn[None, :] < N)
@@ -130,24 +101,9 @@ for pid in range(ceil_div(M, BLOCK_SIZE_M) * ceil_div(N, BLOCK_SIZE_N)):
             # accumulator += mw_chunk[:, skill_idx, None] * torch.matmul(x_chunk, ws_chunk[skill_idx])
             accumulator += skill_weight * torch.matmul(x_chunk, skill_chunk)
 
-        '''
-        ws_rshp = ws_chunk.view(n_skills, -1)
-        merged_weights = torch.matmul(mw_chunk, ws_rshp)
-        merged_weights = merged_weights.reshape(BLOCK_SIZE_M, BLOCK_SIZE_K, BLOCK_SIZE_N)
-        x_rshp = x_chunk.view(BLOCK_SIZE_M, 1, BLOCK_SIZE_K)
-        out = torch.matmul(x_rshp, merged_weights).reshape(BLOCK_SIZE_M, BLOCK_SIZE_N)
-        accumulator += out
-        '''
-        
         # move pointers
         X_ptr += BLOCK_SIZE_K * input_.stride(1)
         Y_ptr += BLOCK_SIZE_K * skill_weights.stride(1)
-
-    # expected_tmp = torch.zeros_like(accumulator)
-    # x_chunk = input_[offset_am]
-    # A_chunk = torch.einsum("bs,sdr->bdr", (mixing_weights[offset_am], skill_weights[:, :, offset_bn]))
-    # out = torch.bmm(x_chunk.unsqueeze(1), A_chunk).squeeze()
-    # breakpoint()
 
     # compute the offsets into the output matrix (think of this as 1D-indexing)
     offset_om = pid_m * BLOCK_SIZE_M + torch.arange(BLOCK_SIZE_M)
