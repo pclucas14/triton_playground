@@ -5,7 +5,7 @@ import torch.nn.functional as F
 import triton
 import triton.language as tl
 
-N_SKILLS = 2 
+N_SKILLS = 8 
 @triton.autotune(
     configs=[
         triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 8, 'N_SKILLS': N_SKILLS}, num_stages=3, num_warps=8),
@@ -138,7 +138,7 @@ def triton_poly(mixing_weights, skill_weights, X):
     triton.testing.Benchmark(
         x_names=['M', 'N', 'K'],  # Argument names to use as an x-axis for the plot
         x_vals=[
-            128 * (i * 5) for i in range(2, 5)
+            128 * (i * 5) for i in range(2, 8)
         ],  # Different possible values for `x_name`
         line_arg='provider',  # Argument name whose value corresponds to a different line in the plot
         # Possible values for `line_arg`
@@ -165,12 +165,13 @@ def benchmark(M, N, K, provider):
     mixing_weights = torch.nn.functional.softmax(module_logits, dim=-1)
     skill_weights = torch.randn(n_skills, M, rank, dtype=DTYPE, device=DEVICE)
     A = torch.einsum("bs,sdr->bdr", (mixing_weights, skill_weights))
+    torch.cuda.synchronize()
 
     input = torch.randn(bs, seq_len, M, dtype=DTYPE, device=DEVICE)
     exp_out = torch.einsum('bsi,bio->bso', (input, A))
     triton_out = triton_poly(mixing_weights, skill_weights, input)
-    print(f'difference total : {(exp_out - triton_out).abs().sum().item():.8f}')
-    print(f'difference max   : {(exp_out - triton_out).abs().max().item():.8f}')
+    # print(f'difference total : {(exp_out - triton_out).abs().sum().item():.8f}')
+    # print(f'difference max   : {(exp_out - triton_out).abs().max().item():.8f}')
     
     quantiles = [0.5, 0.2, 0.8]
     if provider == 'triton':
