@@ -17,10 +17,10 @@ input_ = torch.randn(bs, d_in, dtype=DTYPE, device='cuda')
 output_ = torch.empty(bs, rank, dtype=DTYPE, device='cuda')
 
 # meta parameters
-BLOCK_SIZE_M = 16 # 5 
-BLOCK_SIZE_N = 16 # 7
-BLOCK_SIZE_K = 16 # 3
-GROUP_SIZE_M = 16 # 4
+BLOCK_SIZE_M = 5 
+BLOCK_SIZE_N = 7
+BLOCK_SIZE_K = 3
+GROUP_SIZE_M = 4
 
 A = torch.einsum("bs,sdr->bdr", (mixing_weights, skill_weights))
 A = A.reshape(bs, d_in, rank)
@@ -31,6 +31,7 @@ use_groups = True
 M, N = output_.size()
 K = d_in
 
+seen = {}
 # simulate launch grid
 for pid in range(tl_cdiv(M, BLOCK_SIZE_M) * tl_cdiv(N, BLOCK_SIZE_N)):
 
@@ -42,10 +43,12 @@ for pid in range(tl_cdiv(M, BLOCK_SIZE_M) * tl_cdiv(N, BLOCK_SIZE_N)):
         num_pid_in_group = GROUP_SIZE_M * num_pid_n
         group_id = pid // num_pid_in_group
         first_pid_m = group_id * GROUP_SIZE_M
-        GROUP_SIZE_M = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
-        pid_m = first_pid_m + (pid % GROUP_SIZE_M)
-        pid_n = (pid % num_pid_in_group) // GROUP_SIZE_M
-        print(f'pid_m: {pid_m}, pid_n: {pid_n}')
+        group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
+        pid_m = first_pid_m + (pid % group_size_m)
+        pid_n = (pid % num_pid_in_group) // group_size_m
+        print(f'pid_m: {pid_m}, pid_n: {pid_n}, pid: {pid}')
+        assert (pid_m, pid_n) not in seen, breakpoint()
+        seen[(pid_m, pid_n)] = True
         pass
     else:
         # each pid computes one (i,j) / (m, n) entry in the final matrix
@@ -53,7 +56,7 @@ for pid in range(tl_cdiv(M, BLOCK_SIZE_M) * tl_cdiv(N, BLOCK_SIZE_N)):
         pid_m = pid // num_blocks_n
         pid_n = pid % num_blocks_n
 
-        print(f'pid_m: {pid_m}, pid_n: {pid_n}')
+        print(f'pid_m: {pid_m}, pid_n: {pid_n}, pid: {pid}')
 
     # compute the offsets into the input matrices
     # this is exactly correct if strides for this dimension are 1. 
