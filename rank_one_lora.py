@@ -1,4 +1,5 @@
 import torch
+import torch.nn.functional as F
 
 import triton
 import triton.language as tl
@@ -12,34 +13,31 @@ import triton.language as tl
 @triton.autotune(
     configs=[
         triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 8}, num_stages=3, num_warps=8),
-        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=4, num_warps=4),
-        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=4, num_warps=4),
+        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=4, num_warps=8),
+        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=4, num_warps=8),
         triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=4, num_warps=4),
-        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=4, num_warps=4),
+        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=4, num_warps=4),
         triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=4, num_warps=4),
         triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=5, num_warps=2),
-        triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=5, num_warps=2),
-        triton.Config({'BLOCK_SIZE_M': 16, 'BLOCK_SIZE_N': 16, 'BLOCK_SIZE_K': 16, 'GROUP_SIZE_M': 1}, num_stages=1, num_warps=1),
     ],
-    key=['M', 'N', 'K'],
+    key=['bs', 'd_in', 'd_out'],
 )
 @triton.jit
 def matmul_kernel(
     # Pointers to matrices
-    a_ptr, b_ptr, c_ptr, lora_a_ptr, lora_b_ptr, 
+    x_ptr, W_ptr, out_ptr, lora_a_ptr, lora_b_ptr, 
     # Matrix dimensions
-    M, N, K,
+    bs, d_in, d_out,
     # The stride variables represent how much to increase the ptr by when moving by 1
     # element in a particular dimension. E.g. `stride_am` is how much to increase `a_ptr`
     # by to get the element one row down (A has M rows).
-    stride_am, stride_ak,
-    stride_bk, stride_bn,
-    stride_cm, stride_cn,
+    stride_x_bs, stride_x_din,
+    stride_W_din, stride_W_dout,
+    stride_out_bs, stride_out_dout,
     stride_lora_a, stride_lora_b,
     # Meta-parameters
     BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_K: tl.constexpr,
     GROUP_SIZE_M: tl.constexpr,
-    ACTIVATION: tl.constexpr,
 ):
     """Kernel for computing the matmul C = A x B.
     A has shape (M, K), B has shape (K, N) and C has shape (M, N)
@@ -49,8 +47,8 @@ def matmul_kernel(
     # This is done in a grouped ordering to promote L2 data reuse.
     # See above `L2 Cache Optimizations` section for details.
     pid = tl.program_id(axis=0)
-    num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
-    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
+    num_pid_m = tl.cdiv(bs, BLOCK_SIZE_M)
+    num_pid_n = tl.cdiv(d_out, BLOCK_SIZE_N)
     num_pid_in_group = GROUP_SIZE_M * num_pid_n
     group_id = pid // num_pid_in_group
     first_pid_m = group_id * GROUP_SIZE_M
@@ -65,14 +63,14 @@ def matmul_kernel(
     # `a_ptrs` is a block of [BLOCK_SIZE_M, BLOCK_SIZE_K] pointers
     # `b_ptrs` is a block of [BLOCK_SIZE_K, BLOCK_SIZE_N] pointers
     # See above `Pointer Arithmetics` section for details
-    offs_am = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
-    offs_bn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
-    offs_k = tl.arange(0, BLOCK_SIZE_K)
-    a_ptrs = a_ptr + (offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak)
-    b_ptrs = b_ptr + (offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
+    offs_bs = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % bs
+    offs_dout = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % d_out
+    offs_din = tl.arange(0, BLOCK_SIZE_K)
+    x_ptrs = x_ptr + (offs_bs[:, None] * stride_x_bs + offs_din[None, :] * stride_x_din)
+    W_ptrs = W_ptr + (offs_din[:, None] * stride_W_din + offs_dout[None, :] * stride_W_dout)
 
-    lora_a_ptrs = lora_a_ptr + offs_k[:, None] * stride_lora_a
-    lora_b_ptrs = lora_b_ptr + offs_bn[None, :] * stride_lora_b
+    lora_a_ptrs = lora_a_ptr + offs_din[None, :] * stride_lora_a
+    lora_b_ptrs = lora_b_ptr + offs_dout[None, :] * stride_lora_b
 
     # -----------------------------------------------------------
     # Iterate to compute a block of the C matrix.
@@ -80,82 +78,71 @@ def matmul_kernel(
     # of fp32 values for higher accuracy.
     # `accumulator` will be converted back to fp16 after the loop.
     accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
-    for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
-        loras = tl.full((BLOCK_SIZE_K, BLOCK_SIZE_N), 1., dtype=tl.float16)
+    lora_b = tl.load(lora_b_ptrs, mask=offs_dout[None, :] < d_out, other=0.0)
+    running_lora_dot = tl.zeros((BLOCK_SIZE_M,), dtype=tl.float32)
+
+    for k in range(0, tl.cdiv(d_in, BLOCK_SIZE_K)):
         # Load the next block of A and B, generate a mask by checking the K dimension.
         # If it is out of bounds, set it to 0.
-        a = tl.load(a_ptrs, mask=offs_k[None, :] < K - k * BLOCK_SIZE_K, other=0.0)
-        b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
+        x_chunk = tl.load(x_ptrs, mask=offs_din[None, :] < d_in - k * BLOCK_SIZE_K, other=0.0)
+        W_chunk = tl.load(W_ptrs, mask=offs_din[:, None] < d_in - k * BLOCK_SIZE_K, other=0.0)
+        
+        # (1, K) so we can broadcast on M
+        lora_a = tl.load(lora_a_ptrs, mask=offs_din[None, :] < d_in - k * BLOCK_SIZE_K, other=0.0)
+        running_lora_dot += tl.sum(lora_a * x_chunk, axis=1)
 
-        lora_a = tl.load(lora_a_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
-        lora_b = tl.load(lora_b_ptrs, mask=offs_bn[None, :] < N, other=0.0)
+        #W_chunk = W_chunk + lora_a[:, None] #* lora_b[None, :] # (BLOCK_SIZE_K, BLOCK_SIZE_N)
 
-        loras = loras * lora_a * lora_b
-        weight_and_lora = b + loras
-        out = tl.dot(a, weight_and_lora)
-        accumulator += out
+        # standard matmul 
+        accumulator += tl.dot(x_chunk, W_chunk)
 
         # Advance the ptrs to the next K block.
-        a_ptrs += BLOCK_SIZE_K * stride_ak
-        b_ptrs += BLOCK_SIZE_K * stride_bk
+        x_ptrs += BLOCK_SIZE_K * stride_x_din
+        W_ptrs += BLOCK_SIZE_K * stride_W_din
 
         lora_a_ptrs += BLOCK_SIZE_K * stride_lora_a
 
-    # You can fuse arbitrary activation functions here
-    # while the accumulator is still in FP32!
-    if ACTIVATION == "leaky_relu":
-        accumulator = leaky_relu(accumulator)
-    c = accumulator.to(tl.float16)
+    # apply rank-1 lora 
+    accumulator += running_lora_dot[:, None] * lora_b 
+    
+    accumulator = accumulator.to(tl.float16)
 
     # -----------------------------------------------------------
     # Write back the block of the output matrix C with masks.
     offs_cm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
     offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
-    c_ptrs = c_ptr + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :]
-    c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
-    tl.store(c_ptrs, c, mask=c_mask)
+    out_ptrs = out_ptr + stride_out_bs * offs_cm[:, None] + stride_out_dout * offs_cn[None, :]
+    out_mask = (offs_cm[:, None] < bs) & (offs_cn[None, :] < d_out)
+    tl.store(out_ptrs, accumulator, mask=out_mask)
 
 
-# We can fuse `leaky_relu` by providing it as an `ACTIVATION` meta-parameter in `_matmul`.
-@triton.jit
-def leaky_relu(x):
-    x = x + 1
-    return tl.where(x >= 0, x, 0.01 * x)
-
-
-# %%
-# We can now create a convenience wrapper function that only takes two input tensors,
-# and (1) checks any shape constraint; (2) allocates the output; (3) launches the above kernel.
-
-
-def matmul(a, b, lora_a, lora_b, activation=""):
+def matmul(x, W, lora_a, lora_b):
     # Check constraints.
-    assert a.shape[1] == b.shape[0], "Incompatible dimensions"
-    assert a.is_contiguous(), "Matrix A must be contiguous"
-    assert b.is_contiguous(), "Matrix B must be contiguous"
+    assert x.shape[1] == W.shape[0], "Incompatible dimensions"
+    assert x.is_contiguous(), "Matrix A must be contiguous"
+    assert W.is_contiguous(), "Matrix B must be contiguous"
     assert lora_a.ndim == lora_b.ndim == 1
-    M, K = a.shape
-    K, N = b.shape
+    bs, d_in = x.shape
+    d_in, d_out = W.shape
 
-    assert lora_a.size(0) == K
-    assert lora_b.size(0) == N
+    assert lora_a.size(0) == d_in
+    assert lora_b.size(0) == d_out
 
     # Allocates output.
-    c = torch.empty((M, N), device=a.device, dtype=a.dtype).fill_(torch.nan)
+    output = torch.empty((bs, d_out), device=x.device, dtype=x.dtype).fill_(0)
     # 1D launch kernel where each block gets its own program.
     grid = lambda META: (
-        triton.cdiv(M, META['BLOCK_SIZE_M']) * triton.cdiv(N, META['BLOCK_SIZE_N']),
+        triton.cdiv(bs, META['BLOCK_SIZE_M']) * triton.cdiv(d_out, META['BLOCK_SIZE_N']),
     )
     matmul_kernel[grid](
-        a, b, c, lora_a, lora_b, 
-        M, N, K,
-        a.stride(0), a.stride(1),
-        b.stride(0), b.stride(1),
-        c.stride(0), c.stride(1),
+        x, W, output, lora_a, lora_b, 
+        bs, d_in, d_out,
+        x.stride(0), x.stride(1),
+        W.stride(0), W.stride(1),
+        output.stride(0), output.stride(1),
         lora_a.stride(0), lora_b.stride(0),
-        ACTIVATION=activation
     )
-    return c
+    return output
 
 
 # %%
@@ -172,9 +159,9 @@ def matmul(a, b, lora_a, lora_b, activation=""):
 
 @triton.testing.perf_report(
     triton.testing.Benchmark(
-        x_names=['M', 'N', 'K'],  # Argument names to use as an x-axis for the plot
+        x_names=['d_in', 'd_out'],  # Argument names to use as an x-axis for the plot
         x_vals=[
-            128 * (i * 3) for i in range(2, 11)
+            512, 1024, 2048, 4096, 4096 * 2
         ],  # Different possible values for `x_name`
         line_arg='provider',  # Argument name whose value corresponds to a different line in the plot
         # Possible values for `line_arg`
@@ -188,32 +175,33 @@ def matmul(a, b, lora_a, lora_b, activation=""):
         args={},
     )
 )
-def benchmark(M, N, K, provider):
-    print(M, N, K)
-    a = torch.randn((M, K), device='cuda', dtype=torch.float16)
-    b = torch.randn((K, N), device='cuda', dtype=torch.float16)
+def benchmark(d_in, d_out, provider):
+    bs = 8
+    d_in = d_out // 2
+    print(bs, d_in, d_out)
+    x = torch.randn((bs, d_in), device='cuda', dtype=torch.float16)
+    W = torch.randn((d_in, d_out), device='cuda', dtype=torch.float16)
     
-    lora_a = torch.randn((K,), device='cuda', dtype=torch.float16)
-    lora_b = torch.randn((N,), device='cuda', dtype=torch.float16)
+    lora_a = torch.randn((d_in,), device='cuda', dtype=torch.float16)
+    lora_b = torch.randn((d_out,), device='cuda', dtype=torch.float16)#.fill_(0)
 
-    adapter_fwd  = lambda : torch.einsum('mk,kn->mn', (a, b + torch.outer(lora_a, lora_b))) 
-    exp_out = a.matmul(b) + a.matmul(lora_a[:, None]).matmul(lora_b[None, :])
+    adapter_fwd = lambda: F.linear(x, W.T) + x.matmul(lora_a).view(-1, 1) * lora_b.view(1, -1)
+    exp_out = F.linear(x,W.T) + x.matmul(lora_a[:, None]).matmul(lora_b[None, :])
+    triton_out = matmul(x, W, lora_a, lora_b)
 
-    triton_out = matmul(a, b, lora_a, lora_b)
     diff_total = (exp_out - triton_out).abs().sum()
     diff_max = (exp_out - triton_out).abs().max()
     diff_mean = (exp_out - triton_out).abs().mean()
     print(f'difference total : {diff_total.item():.8f}')
     print(f'difference max   : {diff_max.item():.8f}')
     print(f'difference mean  : {diff_mean.item():.8f}')
-
     
     quantiles = [0.5, 0.2, 0.8]
     if provider == 'cublas':
         ms, min_ms, max_ms = triton.testing.do_bench(adapter_fwd, quantiles=quantiles)
     if provider == 'triton':
-        ms, min_ms, max_ms = triton.testing.do_bench(lambda: matmul(a, b, lora_a, lora_b), quantiles=quantiles)
-    perf = lambda ms: 2 * M * N * K * 1e-12 / (ms * 1e-3)
+        ms, min_ms, max_ms = triton.testing.do_bench(lambda: matmul(x, W, lora_a, lora_b), quantiles=quantiles)
+    perf = lambda ms: 2 * bs * d_out * d_in * 1e-12 / (ms * 1e-3)
     return perf(ms), perf(max_ms), perf(min_ms)
 
 
