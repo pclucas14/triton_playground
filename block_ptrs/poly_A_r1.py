@@ -5,14 +5,21 @@ import torch.nn.functional as F
 import triton
 import triton.language as tl
 
-N_SKILLS = 1 
+N_SKILLS = 4 
 @triton.autotune(
     configs=[
-        triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_K': 512, 'N_SKILLS': N_SKILLS}, num_stages=5, num_warps=4),    
-        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_K': 512, 'N_SKILLS': N_SKILLS}, num_stages=5, num_warps=4),    
-        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_K': 512, 'N_SKILLS': N_SKILLS}, num_stages=5, num_warps=4),    
-        triton.Config({'BLOCK_SIZE_M': 16, 'BLOCK_SIZE_K': 1024, 'N_SKILLS': N_SKILLS}, num_stages=5, num_warps=4),    
+        triton.Config({'BLOCK_SIZE_M': 16, 'BLOCK_SIZE_K': 128, 'N_SKILLS': N_SKILLS}, num_stages=5, num_warps=4),    
+        triton.Config({'BLOCK_SIZE_M': 16, 'BLOCK_SIZE_K': 256, 'N_SKILLS': N_SKILLS}, num_stages=5, num_warps=4),    
+        triton.Config({'BLOCK_SIZE_M': 16, 'BLOCK_SIZE_K': 512, 'N_SKILLS': N_SKILLS}, num_stages=5, num_warps=4),    
         triton.Config({'BLOCK_SIZE_M': 16, 'BLOCK_SIZE_K': 1024, 'N_SKILLS': N_SKILLS}, num_stages=5, num_warps=8),    
+        triton.Config({'BLOCK_SIZE_M': 16, 'BLOCK_SIZE_K': 2048, 'N_SKILLS': N_SKILLS}, num_stages=5, num_warps=4),    
+        triton.Config({'BLOCK_SIZE_M': 16, 'BLOCK_SIZE_K': 4096, 'N_SKILLS': N_SKILLS}, num_stages=5, num_warps=4),    
+        triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_K': 128, 'N_SKILLS': N_SKILLS}, num_stages=5, num_warps=4),    
+        triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_K': 256, 'N_SKILLS': N_SKILLS}, num_stages=5, num_warps=4),    
+        triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_K': 512, 'N_SKILLS': N_SKILLS}, num_stages=5, num_warps=4),    
+        triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_K': 1024, 'N_SKILLS': N_SKILLS}, num_stages=5, num_warps=8),    
+        triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_K': 2048, 'N_SKILLS': N_SKILLS}, num_stages=5, num_warps=4),    
+        triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_K': 4096, 'N_SKILLS': N_SKILLS}, num_stages=5, num_warps=4),    
         ],
     key=['bs', 'seq_len', 'd_in'],
 )
@@ -169,7 +176,7 @@ def triton_poly(mixing_weights, skill_weights, X):
 )
 def benchmark(M, N, K, provider):
     print(provider)
-    bs = 512
+    bs = 8
     n_skills = N_SKILLS 
     seq_len = 1024
     rank = 1
