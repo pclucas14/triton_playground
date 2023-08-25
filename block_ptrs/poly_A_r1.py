@@ -6,7 +6,12 @@ import triton
 import triton.language as tl
 
 N_SKILLS = 8
-@triton.autotune(
+DEBUG = True
+if DEBUG: 
+    config = [
+        triton.Config({'BLOCK_SIZE_M': 16, 'BLOCK_SIZE_K': 128, 'N_SKILLS': N_SKILLS}, num_stages=5, num_warps=4),    
+    ]        
+else:
     configs=[
         triton.Config({'BLOCK_SIZE_M': 16, 'BLOCK_SIZE_K': 128, 'N_SKILLS': N_SKILLS}, num_stages=5, num_warps=4),    
         triton.Config({'BLOCK_SIZE_M': 16, 'BLOCK_SIZE_K': 256, 'N_SKILLS': N_SKILLS}, num_stages=5, num_warps=4),    
@@ -20,8 +25,10 @@ N_SKILLS = 8
         triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_K': 1024, 'N_SKILLS': N_SKILLS}, num_stages=5, num_warps=8),    
         triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_K': 2048, 'N_SKILLS': N_SKILLS}, num_stages=5, num_warps=4),    
         triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_K': 4096, 'N_SKILLS': N_SKILLS}, num_stages=5, num_warps=4),    
-        ],
+    ]
+@triton.autotune(
     key=['bs', 'seq_len', 'd_in'],
+    configs=config,
 )
 @triton.jit
 def poly_linear_kernel(
@@ -181,7 +188,7 @@ def triton_poly(mixing_weights, skill_weights, X):
 )
 def benchmark(M, N, K, provider):
     print(provider)
-    bs = 8
+    bs = 65
     n_skills = N_SKILLS 
     seq_len = 4_096
     # seq_len = 1_024
