@@ -5,7 +5,7 @@ import torch.nn.functional as F
 import triton
 import triton.language as tl
 
-N_SKILLS = 4 
+N_SKILLS = 8
 @triton.autotune(
     configs=[
         triton.Config({'BLOCK_SIZE_M': 16, 'BLOCK_SIZE_K': 128, 'N_SKILLS': N_SKILLS}, num_stages=5, num_warps=4),    
@@ -183,7 +183,7 @@ def benchmark(M, N, K, provider):
     print(provider)
     bs = 8
     n_skills = N_SKILLS 
-    seq_len = 1025
+    seq_len = 5_000
     #seq_len = 1024
     rank = 1
     DTYPE=torch.float16
