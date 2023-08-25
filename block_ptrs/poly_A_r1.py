@@ -183,8 +183,8 @@ def benchmark(M, N, K, provider):
     print(provider)
     bs = 8
     n_skills = N_SKILLS 
-    seq_len = 5_000
-    #seq_len = 1024
+    seq_len = 4_096
+    # seq_len = 1_024
     rank = 1
     DTYPE=torch.float16
     DEVICE='cuda'
@@ -198,9 +198,12 @@ def benchmark(M, N, K, provider):
     A = torch.einsum("bs,sd->bd", (mixing_weights, skill_weights))
 
     exp_out = torch.einsum('bsi,bi->bs', (input, A))
+    gold_out = torch.einsum('bsi,bi->bs', (input.to(torch.float64), A.to(torch.float64))).to(DTYPE)
     triton_out = triton_poly(mixing_weights, skill_weights, input)
-    print(f'difference total : {(exp_out - triton_out).abs().sum().item():.8f}')
-    print(f'difference max   : {(exp_out - triton_out).abs().max().item():.8f}')
+    print(f'diff exp total    : {(exp_out - gold_out).abs().sum().item():.5f}')
+    print(f'diff exp max      : {(gold_out - exp_out).abs().max().item():.5f}')
+    print(f'diff triton total : {(gold_out - triton_out).abs().sum().item():.5f}')
+    print(f'diff triton max   : {(gold_out - triton_out).abs().max().item():.5f}')
     show = lambda idx : ((triton_out[idx] - exp_out[idx]).pow(2) * 100).int()
     quantiles = [0.5, 0.2, 0.8]
     if provider == 'triton':
