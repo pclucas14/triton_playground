@@ -9,17 +9,17 @@ N_SKILLS = 4
 @triton.autotune(
     configs=[
         triton.Config({'BLOCK_SIZE_M': 16, 'BLOCK_SIZE_K': 128, 'N_SKILLS': N_SKILLS}, num_stages=5, num_warps=4),    
-        #triton.Config({'BLOCK_SIZE_M': 16, 'BLOCK_SIZE_K': 256, 'N_SKILLS': N_SKILLS}, num_stages=5, num_warps=4),    
-        #triton.Config({'BLOCK_SIZE_M': 16, 'BLOCK_SIZE_K': 512, 'N_SKILLS': N_SKILLS}, num_stages=5, num_warps=4),    
-        #triton.Config({'BLOCK_SIZE_M': 16, 'BLOCK_SIZE_K': 1024, 'N_SKILLS': N_SKILLS}, num_stages=5, num_warps=8),    
-        #triton.Config({'BLOCK_SIZE_M': 16, 'BLOCK_SIZE_K': 2048, 'N_SKILLS': N_SKILLS}, num_stages=5, num_warps=4),    
-        #triton.Config({'BLOCK_SIZE_M': 16, 'BLOCK_SIZE_K': 4096, 'N_SKILLS': N_SKILLS}, num_stages=5, num_warps=4),    
-        #triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_K': 128, 'N_SKILLS': N_SKILLS}, num_stages=5, num_warps=4),    
-        #triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_K': 256, 'N_SKILLS': N_SKILLS}, num_stages=5, num_warps=4),    
-        #triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_K': 512, 'N_SKILLS': N_SKILLS}, num_stages=5, num_warps=4),    
-        #triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_K': 1024, 'N_SKILLS': N_SKILLS}, num_stages=5, num_warps=8),    
-        #triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_K': 2048, 'N_SKILLS': N_SKILLS}, num_stages=5, num_warps=4),    
-        #triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_K': 4096, 'N_SKILLS': N_SKILLS}, num_stages=5, num_warps=4),    
+        triton.Config({'BLOCK_SIZE_M': 16, 'BLOCK_SIZE_K': 256, 'N_SKILLS': N_SKILLS}, num_stages=5, num_warps=4),    
+        triton.Config({'BLOCK_SIZE_M': 16, 'BLOCK_SIZE_K': 512, 'N_SKILLS': N_SKILLS}, num_stages=5, num_warps=4),    
+        triton.Config({'BLOCK_SIZE_M': 16, 'BLOCK_SIZE_K': 1024, 'N_SKILLS': N_SKILLS}, num_stages=5, num_warps=8),    
+        triton.Config({'BLOCK_SIZE_M': 16, 'BLOCK_SIZE_K': 2048, 'N_SKILLS': N_SKILLS}, num_stages=5, num_warps=4),    
+        triton.Config({'BLOCK_SIZE_M': 16, 'BLOCK_SIZE_K': 4096, 'N_SKILLS': N_SKILLS}, num_stages=5, num_warps=4),    
+        triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_K': 128, 'N_SKILLS': N_SKILLS}, num_stages=5, num_warps=4),    
+        triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_K': 256, 'N_SKILLS': N_SKILLS}, num_stages=5, num_warps=4),    
+        triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_K': 512, 'N_SKILLS': N_SKILLS}, num_stages=5, num_warps=4),    
+        triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_K': 1024, 'N_SKILLS': N_SKILLS}, num_stages=5, num_warps=8),    
+        triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_K': 2048, 'N_SKILLS': N_SKILLS}, num_stages=5, num_warps=4),    
+        triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_K': 4096, 'N_SKILLS': N_SKILLS}, num_stages=5, num_warps=4),    
         ],
     key=['bs', 'seq_len', 'd_in'],
 )
@@ -30,8 +30,8 @@ def poly_linear_kernel(
     bs, seq_len, d_in,
     stride_alpha_b, stride_alpha_k,      # bs, n_skills 
     stride_weights_k, stride_weights_d,  # n_skills, d_in
-    stride_input_b, stride_input_d,      # (bs), seq_len, d_in 
-    stride_output_b, #stride_output_s,    # bs, seq_len 
+    stride_input_bs, stride_input_d,     # (bs), seq_len, d_in 
+    stride_output_b, stride_output_s,    # bs, seq_len 
     BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_K: tl.constexpr, N_SKILLS: tl.constexpr
 ):
     K = d_in
@@ -45,7 +45,7 @@ def poly_linear_kernel(
     input_block_ptr = tl.make_block_ptr(
         base=input_ptr,
         shape=(bs * seq_len, d_in), # TODO : move from bs * seq_len to just seq_len,
-        strides=(stride_input_b, stride_input_d), # .. and adjust strides accordingly
+        strides=(stride_input_bs, stride_input_d), # .. and adjust strides accordingly
         offsets=(batch_idx * seq_len + seq_idx * BLOCK_SIZE_M, 0),
         block_shape=(BLOCK_SIZE_M, BLOCK_SIZE_K),
         order=(1,0),
@@ -60,12 +60,13 @@ def poly_linear_kernel(
     )
     output_block_ptr = tl.make_block_ptr(
         base=output_ptr,
-        shape=(bs * seq_len),
-        strides=(stride_output_b,),# stride_output_s),
-        offsets=(batch_idx * seq_len + seq_idx * BLOCK_SIZE_M,), #(batch_idx, seq_idx),
-        block_shape=(BLOCK_SIZE_M,), #(1, BLOCK_SIZE_M),
-        order=(0),# 1),
+        shape=(bs, seq_len),
+        strides=(stride_output_b, stride_output_s), # stride_output_s),
+        offsets=(batch_idx, seq_idx * BLOCK_SIZE_M), #(batch_idx, seq_idx), TODO: WHY * BLOCK_SIZE_M ?
+        block_shape=(1, BLOCK_SIZE_M), #(1, BLOCK_SIZE_M),
+        order=(0,1),
     )
+    # first index is 
 
     ''' 
     offs_am = (pid * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
@@ -123,8 +124,8 @@ def poly_linear_kernel(
     output_mask = (offs_om < M)
     tl.store(output_ptrs, c, mask=output_mask)
     '''
-    # tl.store(output_block_ptr, accumulator.to(tl.float16)[None, :], boundary_check=(0,))
-    tl.store(output_block_ptr, accumulator.to(tl.float16), boundary_check=(0,))
+    tl.store(output_block_ptr, accumulator.to(tl.float16)[None, :], boundary_check=(0,1))
+    # tl.store(output_block_ptr, accumulator.to(tl.float16), boundary_check=(0,))
     
 def triton_poly(mixing_weights, skill_weights, X):
 
@@ -142,9 +143,9 @@ def triton_poly(mixing_weights, skill_weights, X):
     DTYPE = mixing_weights.dtype
     DEVICE = mixing_weights.device
 
-    output = torch.empty(bs * seq_len, dtype=DTYPE, device=DEVICE)
+    output = torch.empty(bs, seq_len, dtype=DTYPE, device=DEVICE)
     # output = torch.empty(bs * seq_len, dtype=DTYPE, device=DEVICE)# .fill_(torch.nan)
-    # X = X.flatten(0,1)
+    X = X.flatten(0,1)
 
     B, M, N = bs, seq_len, 1
     grid = lambda META: (
@@ -155,8 +156,8 @@ def triton_poly(mixing_weights, skill_weights, X):
         bs, seq_len, d_in,
         mixing_weights.stride(0), mixing_weights.stride(1), 
         skill_weights.stride(0), skill_weights.stride(1), 
-        X.stride(1), X.stride(2), 
-        output.stride(0), #output.stride(1), output.stride(0)
+        X.stride(0), X.stride(1), 
+        output.stride(0), output.stride(1)#, output.stride(0)
     )
     return output.view(bs, seq_len)
 
@@ -182,7 +183,7 @@ def benchmark(M, N, K, provider):
     print(provider)
     bs = 8
     n_skills = N_SKILLS 
-    seq_len = 65 #33
+    seq_len = 1025
     #seq_len = 1024
     rank = 1
     DTYPE=torch.float16
@@ -201,7 +202,6 @@ def benchmark(M, N, K, provider):
     print(f'difference total : {(exp_out - triton_out).abs().sum().item():.8f}')
     print(f'difference max   : {(exp_out - triton_out).abs().max().item():.8f}')
     show = lambda idx : ((triton_out[idx] - exp_out[idx]).pow(2) * 100).int()
-    breakpoint()
     quantiles = [0.5, 0.2, 0.8]
     if provider == 'triton':
         ms, min_ms, max_ms = triton.testing.do_bench(lambda: triton_poly(mixing_weights, skill_weights, input), quantiles=quantiles)
