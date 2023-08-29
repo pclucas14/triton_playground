@@ -5,14 +5,14 @@ import torch.nn.functional as F
 import triton
 import triton.language as tl
 
-N_SKILLS = 8
-DEBUG = True
+DEBUG = False
+N_SKILLS = 2
 if DEBUG: 
     config = [
         triton.Config({'BLOCK_SIZE_M': 16, 'BLOCK_SIZE_K': 128, 'N_SKILLS': N_SKILLS}, num_stages=5, num_warps=4),    
     ]        
 else:
-    configs=[
+    config=[
         triton.Config({'BLOCK_SIZE_M': 16, 'BLOCK_SIZE_K': 128, 'N_SKILLS': N_SKILLS}, num_stages=5, num_warps=4),    
         triton.Config({'BLOCK_SIZE_M': 16, 'BLOCK_SIZE_K': 256, 'N_SKILLS': N_SKILLS}, num_stages=5, num_warps=4),    
         triton.Config({'BLOCK_SIZE_M': 16, 'BLOCK_SIZE_K': 512, 'N_SKILLS': N_SKILLS}, num_stages=5, num_warps=4),    
@@ -188,7 +188,7 @@ def triton_poly(mixing_weights, skill_weights, X):
 )
 def benchmark(M, N, K, provider):
     print(provider)
-    bs = 65
+    bs = 64
     n_skills = N_SKILLS 
     seq_len = 4_096
     # seq_len = 1_024
@@ -224,5 +224,5 @@ def benchmark(M, N, K, provider):
     perf = lambda ms: 2 * M * N * K * 1e-12 / (ms * 1e-3)
     return perf(ms), perf(max_ms), perf(min_ms)
 
-
-benchmark.run(show_plots=True, print_data=True)
+if __name__ == '__main__':
+    benchmark.run(show_plots=True, print_data=True)

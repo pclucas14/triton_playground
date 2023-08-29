@@ -5,7 +5,7 @@ import torch.nn.functional as F
 import triton
 import triton.language as tl
 
-N_SKILLS = 2
+N_SKILLS = 8
 DEBUG = False
 if DEBUG: 
     config = [
@@ -25,9 +25,19 @@ else:
         triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_K': 1024, 'N_SKILLS': N_SKILLS,'BLOCK_SIZE_N': 16}, num_stages=5, num_warps=8),    
         triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_K': 2048, 'N_SKILLS': N_SKILLS,'BLOCK_SIZE_N': 16}, num_stages=5, num_warps=4),    
         triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_K': 4096, 'N_SKILLS': N_SKILLS,'BLOCK_SIZE_N': 16}, num_stages=5, num_warps=4),    
+        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_K': 32, 'N_SKILLS': N_SKILLS,'BLOCK_SIZE_N': 16}, num_stages=5, num_warps=4),    
+        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_K': 64, 'N_SKILLS': N_SKILLS,'BLOCK_SIZE_N': 16}, num_stages=5, num_warps=4),    
+        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_K': 128, 'N_SKILLS': N_SKILLS,'BLOCK_SIZE_N': 16}, num_stages=5, num_warps=4),    
+        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_K': 32, 'N_SKILLS': N_SKILLS,'BLOCK_SIZE_N': 16}, num_stages=5, num_warps=4),    
+        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_K': 64, 'N_SKILLS': N_SKILLS,'BLOCK_SIZE_N': 16}, num_stages=5, num_warps=4),    
+        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_K': 128, 'N_SKILLS': N_SKILLS,'BLOCK_SIZE_N': 16}, num_stages=5, num_warps=4),    
+        triton.Config({'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_K': 32, 'N_SKILLS': N_SKILLS,'BLOCK_SIZE_N': 16}, num_stages=5, num_warps=4),    
+        triton.Config({'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_K': 64, 'N_SKILLS': N_SKILLS,'BLOCK_SIZE_N': 16}, num_stages=5, num_warps=4),    
+        triton.Config({'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_K': 128, 'N_SKILLS': N_SKILLS,'BLOCK_SIZE_N': 16}, num_stages=5, num_warps=4),    
+        triton.Config({'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_K': 256, 'N_SKILLS': N_SKILLS,'BLOCK_SIZE_N': 16}, num_stages=5, num_warps=4),    
     ]
 @triton.autotune(
-    key=['bs', 'seq_len', 'd_in'],
+    key=['bs', 'seq_len', 'd_in', 'rank'],
     configs=config,
 )
 @triton.jit
@@ -101,12 +111,9 @@ def poly_linear_kernel(
         # accumulator += tl.sum(x_chunk * weights, axis=1)
         accumulator += tl.dot(x_chunk, weights)
 
-        # should be no need now to increment the weight_block_ptr
         input_block_ptr = tl.advance(input_block_ptr, (0, BLOCK_SIZE_K))
         weight_block_ptr = tl.advance(weight_block_ptr, (-N_SKILLS * d_in + BLOCK_SIZE_K, 0))
 
-
-    # tl.store(output_block_ptr, accumulator.to(tl.float16)[None, :], boundary_check=(0,1))
     tl.store(output_block_ptr, accumulator.to(tl.float16), boundary_check=(0,1))
     
 def triton_poly(mixing_weights, skill_weights, X):
@@ -126,7 +133,7 @@ def triton_poly(mixing_weights, skill_weights, X):
     DTYPE = mixing_weights.dtype
     DEVICE = mixing_weights.device
 
-    output = torch.empty(bs, seq_len, rank, dtype=DTYPE, device=DEVICE).fill_(0)
+    output = torch.empty(bs, seq_len, rank, dtype=DTYPE, device=DEVICE)
 
     B, M, N = bs, seq_len, 1
     grid = lambda META: (
@@ -164,7 +171,7 @@ def benchmark(M, N, K, provider):
     print(provider)
     bs = 16
     n_skills = N_SKILLS 
-    seq_len = 4_096
+    seq_len = 32
     # seq_len = 1_024
     rank = 16
     DTYPE=torch.float16
